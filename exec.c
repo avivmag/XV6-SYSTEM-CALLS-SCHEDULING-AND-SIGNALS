@@ -2,10 +2,22 @@
 #include "param.h"
 #include "memlayout.h"
 #include "mmu.h"
-#include "proc.h"
 #include "defs.h"
 #include "x86.h"
+#include "proc.h"
 #include "elf.h"
+#include "syscall.h"
+#include "traps.h"
+
+/////////////1.3
+void beginExit(){
+  asm("pushl %eax");
+  asm("pushl %eax");
+  asm("movl %0, %%eax" :: "i" (SYS_exit));
+  asm("int %0"          :: "i" (T_SYSCALL));
+}
+void endExit(){}
+/////////////end of 1.3
 
 int
 exec(char *path, char **argv)
@@ -44,11 +56,7 @@ exec(char *path, char **argv)
       continue;
     if(ph.memsz < ph.filesz)
       goto bad;
-    if(ph.vaddr + ph.memsz < ph.vaddr)
-      goto bad;
     if((sz = allocuvm(pgdir, sz, ph.vaddr + ph.memsz)) == 0)
-      goto bad;
-    if(ph.vaddr % PGSIZE != 0)
       goto bad;
     if(loaduvm(pgdir, (char*)ph.vaddr, ip, ph.off, ph.filesz) < 0)
       goto bad;
@@ -65,6 +73,13 @@ exec(char *path, char **argv)
   clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
   sp = sz;
 
+/////////////1.3 - here we are injecting the assembly code.
+  int exitSize = endExit - beginExit;
+  int offsetCode = sp = (sp - exitSize) & ~3;
+  if(copyout(pgdir, sp, beginExit, exitSize) < 0)
+      goto bad;
+/////////////end of 1.3
+
   // Push argument strings, prepare rest of stack in ustack.
   for(argc = 0; argv[argc]; argc++) {
     if(argc >= MAXARG)
@@ -76,7 +91,10 @@ exec(char *path, char **argv)
   }
   ustack[3+argc] = 0;
 
-  ustack[0] = 0xffffffff;  // fake return PC
+/////////////1.3
+  ustack[0] = offsetCode;
+/////////////end of 1.3
+  //ustack[0] = 0xffffffff;  // fake return PC
   ustack[1] = argc;
   ustack[2] = sp - (argc+1)*4;  // argv pointer
 
@@ -89,6 +107,10 @@ exec(char *path, char **argv)
     if(*s == '/')
       last = s+1;
   safestrcpy(proc->name, last, sizeof(proc->name));
+
+  proc->pending = 0;
+  for(i = 0; i < NUMSIG; i++)
+    proc->signalHandler[i] = (sighandler_t) -1;
 
   // Commit to the user image.
   oldpgdir = proc->pgdir;

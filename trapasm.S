@@ -1,4 +1,4 @@
-#include "mmu.h"
+  #include "mmu.h"
 
   # vectors.S sends all traps here.
 .globl alltraps
@@ -26,6 +26,10 @@ alltraps:
   # Return falls through to trapret...
 .globl trapret
 trapret:
+  pushl %esp
+  call signalHandler
+  popl %esp
+
   popal
   popl %gs
   popl %fs

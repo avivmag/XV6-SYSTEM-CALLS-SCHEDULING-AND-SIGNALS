@@ -8,6 +8,7 @@ struct rtcdate;
 struct spinlock;
 struct stat;
 struct superblock;
+struct perf;
 
 // bio.c
 void            binit(void);
@@ -88,7 +89,9 @@ void            end_op();
 
 // mp.c
 extern int      ismp;
+int             mpbcpu(void);
 void            mpinit(void);
+void            mpstartthem(void);
 
 // picirq.c
 void            picenable(int);
@@ -102,7 +105,8 @@ int             pipewrite(struct pipe*, char*, int);
 
 //PAGEBREAK: 16
 // proc.c
-void            exit(void);
+struct proc*    copyproc(struct proc*);
+void            exit(int status);
 int             fork(void);
 int             growproc(int);
 int             kill(int);
@@ -112,9 +116,15 @@ void            scheduler(void) __attribute__((noreturn));
 void            sched(void);
 void            sleep(void*, struct spinlock*);
 void            userinit(void);
-int             wait(void);
+int 			wait(int *status);
 void            wakeup(void*);
 void            yield(void);
+int 			schedp(int sched_policy_id);
+int 			priority(int pr);
+int 			wait_stat(int* status, struct perf *);
+sighandler_t 	signal(int signum, sighandler_t handler);
+int 			sigsend(int pid, int signum);
+int 			sigreturn(void);
 
 // swtch.S
 void            swtch(struct context**, struct context*);
@@ -162,6 +172,7 @@ void            uartputc(int);
 // vm.c
 void            seginit(void);
 void            kvmalloc(void);
+void            vmenable(void);
 pde_t*          setupkvm(void);
 char*           uva2ka(pde_t*, char*);
 int             allocuvm(pde_t*, uint, uint);

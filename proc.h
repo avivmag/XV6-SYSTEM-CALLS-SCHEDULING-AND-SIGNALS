@@ -1,3 +1,13 @@
+// Segments in proc->gdt.
+#define NSEGS     7
+// Scheduler policies
+#define SCHEDULER_UNIFORM   1
+#define SCHEDULER_PRIORITY  2
+#define SCHEDULER_DYNAMIC   3
+#define NUMSIG 32
+
+struct trapframe;
+
 // Per-CPU state
 struct cpu {
   uchar id;                    // Local APIC ID; index into cpus[] below
@@ -7,7 +17,7 @@ struct cpu {
   volatile uint started;       // Has the CPU started?
   int ncli;                    // Depth of pushcli nesting.
   int intena;                  // Were interrupts enabled before pushcli?
-
+  
   // Cpu-local storage variables; see below
   struct cpu *cpu;
   struct proc *proc;           // The currently-running process.
@@ -15,6 +25,7 @@ struct cpu {
 
 extern struct cpu cpus[NCPU];
 extern int ncpu;
+void updateProcessesTime();
 
 // Per-CPU variables, holding pointers to the
 // current cpu and to the current process.
@@ -57,12 +68,24 @@ struct proc {
   int pid;                     // Process ID
   struct proc *parent;         // Parent process
   struct trapframe *tf;        // Trap frame for current syscall
+  struct trapframe btf;       // Copy of trap frame for current syscall
   struct context *context;     // swtch() here to run process
   void *chan;                  // If non-zero, sleeping on chan
   int killed;                  // If non-zero, have been killed
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int status;
+  int ntickets;
+  int pr;
+  int ctime;
+  int ttime;
+  int stime;
+  int retime;
+  int rutime;
+  uint pending;
+  sighandler_t signalHandler[NUMSIG];
+  int insignal;
 };
 
 // Process memory is laid out contiguously, low addresses first:

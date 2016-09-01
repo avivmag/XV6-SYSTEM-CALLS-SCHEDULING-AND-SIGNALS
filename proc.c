@@ -6,6 +6,14 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "perf.h"
+
+int currentScheduler = SCHEDULER_PRIORITY;
+
+struct proc *getWinningProcess();
+int schedp(int sched_policy_id);
+int priority(int pr);
+int sigsend(int pid, int signum);
 
 struct {
   struct spinlock lock;
@@ -31,21 +39,24 @@ pinit(void)
 // If found, change state to EMBRYO and initialize
 // state required to run in the kernel.
 // Otherwise return 0.
-// Must hold ptable.lock.
 static struct proc*
 allocproc(void)
 {
   struct proc *p;
   char *sp;
+  int i;
 
+  acquire(&ptable.lock);
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == UNUSED)
       goto found;
+  release(&ptable.lock);
   return 0;
 
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  release(&ptable.lock);
 
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
@@ -53,11 +64,11 @@ found:
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
-
+  
   // Leave room for trap frame.
   sp -= sizeof *p->tf;
   p->tf = (struct trapframe*)sp;
-
+  
   // Set up new context to start executing at forkret,
   // which returns to trapret.
   sp -= 4;
@@ -67,6 +78,25 @@ found:
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
+
+  p->pr = 10;
+  switch(currentScheduler)
+  {
+    case SCHEDULER_UNIFORM:
+    case SCHEDULER_PRIORITY:
+      p->ntickets = 10; 
+      break;
+    case SCHEDULER_DYNAMIC:
+      p->ntickets = 20;
+    break;
+  }
+
+  // zero the signals structure and pending
+  p->pending = 0;
+  for(i = 0; i < NUMSIG; i++)
+    p->signalHandler[i] = (sighandler_t)-1;
+
+  p->ctime = ticks;
 
   return p;
 }
@@ -78,9 +108,7 @@ userinit(void)
 {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
-
-  acquire(&ptable.lock);
-
+  
   p = allocproc();
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
@@ -100,8 +128,6 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
-
-  release(&ptable.lock);
 }
 
 // Grow current process's memory by n bytes.
@@ -110,7 +136,7 @@ int
 growproc(int n)
 {
   uint sz;
-
+  
   sz = proc->sz;
   if(n > 0){
     if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0)
@@ -133,23 +159,19 @@ fork(void)
   int i, pid;
   struct proc *np;
 
-  acquire(&ptable.lock);
-
   // Allocate process.
-  if((np = allocproc()) == 0){
-    release(&ptable.lock);
+  if((np = allocproc()) == 0)
     return -1;
-  }
 
   // Copy process state from p.
   if((np->pgdir = copyuvm(proc->pgdir, proc->sz)) == 0){
     kfree(np->kstack);
     np->kstack = 0;
     np->state = UNUSED;
-    release(&ptable.lock);
     return -1;
   }
   np->sz = proc->sz;
+
   np->parent = proc;
   *np->tf = *proc->tf;
 
@@ -161,23 +183,30 @@ fork(void)
       np->ofile[i] = filedup(proc->ofile[i]);
   np->cwd = idup(proc->cwd);
 
-  safestrcpy(np->name, proc->name, sizeof(proc->name));
+  for(i = 0; i < NUMSIG; i++)
+    np->signalHandler[i] = proc->signalHandler[i];
 
+  safestrcpy(np->name, proc->name, sizeof(proc->name));
+ 
   pid = np->pid;
 
+  // lock to force the compiler to emit the np->state write last.
+  acquire(&ptable.lock);
   np->state = RUNNABLE;
-
   release(&ptable.lock);
-
+  
   return pid;
 }
 
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait() to find out it exited.
+// void
+// exit(void)
 void
-exit(void)
+exit(int status)
 {
+  proc->status = status;
   struct proc *p;
   int fd;
 
@@ -213,14 +242,13 @@ exit(void)
 
   // Jump into the scheduler, never to return.
   proc->state = ZOMBIE;
+  proc->ttime = ticks;
   sched();
   panic("zombie exit");
 }
 
-// Wait for a child process to exit and return its pid.
-// Return -1 if this process has no children.
 int
-wait(void)
+wait_helper(int *status, struct perf *prf)
 {
   struct proc *p;
   int havekids, pid;
@@ -239,11 +267,27 @@ wait(void)
         kfree(p->kstack);
         p->kstack = 0;
         freevm(p->pgdir);
+        p->state = UNUSED;
+        if(status)
+          *status = p->status;
+        p->status = 0;
         p->pid = 0;
         p->parent = 0;
         p->name[0] = 0;
         p->killed = 0;
-        p->state = UNUSED;
+        if(prf)
+        {
+          prf->ctime = p->ctime;
+          prf->ttime = p->ttime;
+          prf->stime = p->stime;
+          prf->retime = p->retime;
+          prf->rutime = p->rutime;
+        }
+        p->ctime = 0;
+        p->ttime = 0;
+        p->stime = 0;
+        p->retime = 0;
+        p->rutime = 0;
         release(&ptable.lock);
         return pid;
       }
@@ -258,6 +302,22 @@ wait(void)
     // Wait for children to exit.  (See wakeup1 call in proc_exit.)
     sleep(proc, &ptable.lock);  //DOC: wait-sleep
   }
+}
+
+// Wait for a child process to exit and return its pid.
+// Return -1 if this process has no children.
+// int
+// wait(void)
+int
+wait(int *status)
+{
+  return wait_helper(status, 0);
+}
+
+int
+wait_stat(int *status, struct perf * p)
+{
+  return wait_helper(status, p);
 }
 
 //PAGEBREAK: 42
@@ -279,17 +339,20 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
-
+    // for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    //   if(p->state != RUNNABLE)
+    //     continue;
+      
+    p = getWinningProcess();
+    if(p)
+    {
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
       proc = p;
       switchuvm(p);
       p->state = RUNNING;
-      swtch(&cpu->scheduler, p->context);
+      swtch(&cpu->scheduler, proc->context);
       switchkvm();
 
       // Process is done running for now.
@@ -297,8 +360,44 @@ scheduler(void)
       proc = 0;
     }
     release(&ptable.lock);
-
   }
+}
+
+int 
+sigreturn(void)
+{
+  acquire(&ptable.lock);
+  *(proc->tf) = proc->btf;
+  release(&ptable.lock);
+  proc->insignal = 0;
+
+  return 0;
+}
+
+uint next = 1;
+struct proc *getWinningProcess(){
+  struct proc *p;
+  uint sum = 0;
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == RUNNABLE)
+      sum += p->ntickets;}
+    
+  if(!sum)
+    return 0;
+
+  next = (ticks * 541232 + next) % sum;
+  
+  int temp = next;
+
+  for(p = ptable.proc; temp >= 0; p++){
+    if(p->state == RUNNABLE)
+    {
+      temp -= p->ntickets;
+      if(temp < 0)
+        break;
+    }
+  }
+  return p;
 }
 
 // Enter scheduler.  Must hold only ptable.lock
@@ -325,8 +424,10 @@ sched(void)
 void
 yield(void)
 {
-  acquire(&ptable.lock);  //DOC: yieldlock
+  acquire(&ptable.lock);
   proc->state = RUNNABLE;
+  if(currentScheduler == SCHEDULER_DYNAMIC)
+    proc->ntickets = proc->ntickets <= 1 ? 1 : proc->ntickets - 1;
   sched();
   release(&ptable.lock);
 }
@@ -342,13 +443,13 @@ forkret(void)
 
   if (first) {
     // Some initialization functions must be run in the context
-    // of a regular process (e.g., they call sleep), and thus cannot
+    // of a regular process (e.g., they call sleep), and thus cannot 
     // be run from main().
     first = 0;
     iinit(ROOTDEV);
     initlog(ROOTDEV);
   }
-
+  
   // Return to "caller", actually trapret (see allocproc).
 }
 
@@ -376,6 +477,9 @@ sleep(void *chan, struct spinlock *lk)
 
   // Go to sleep.
   proc->chan = chan;
+  if(currentScheduler == SCHEDULER_DYNAMIC)
+    proc->ntickets = proc->ntickets + 10 > 100 ? 100 : proc->ntickets + 10;
+  
   proc->state = SLEEPING;
   sched();
 
@@ -453,7 +557,7 @@ procdump(void)
   struct proc *p;
   char *state;
   uint pc[10];
-
+  
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->state == UNUSED)
       continue;
@@ -469,4 +573,97 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+
+int 
+schedp(int sched_policy_id)
+{
+  currentScheduler = sched_policy_id;
+  struct proc *p;
+  acquire(&ptable.lock);
+  switch(sched_policy_id)
+  {
+    case SCHEDULER_UNIFORM:
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        p->ntickets = 10;
+      }
+    break;
+    case SCHEDULER_PRIORITY:
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        p->ntickets = p->pr;
+      }
+    break;
+    case SCHEDULER_DYNAMIC:
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        p->ntickets = 20;
+      }
+    break;
+    default:
+      return -1;
+    break;
+  }
+  release(&ptable.lock);
+  return 0;
+}
+
+int 
+priority(int pr)
+{
+  acquire(&ptable.lock);
+  proc->pr = pr;
+
+  if(currentScheduler == SCHEDULER_PRIORITY)
+    proc->ntickets = pr;
+
+  release(&ptable.lock);
+  return 0;
+}
+
+void
+updateProcessesTime()
+{
+  struct proc *p;
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    switch(p->state)
+    {
+      case SLEEPING:
+        p->stime++;
+        break;
+      case RUNNABLE:
+        p->retime++;
+        break;
+      case RUNNING:
+        p->rutime++;
+        break;
+      default:
+        break;
+    }
+  }
+  release(&ptable.lock);
+}
+
+int sigsend(int pid, int signum)
+{
+  struct proc *p;
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->pid == pid)
+    {
+      int pow = 1;
+      while(signum > 0)
+      {
+        pow *= 2;
+        signum--;
+      }
+      p->pending |= pow;
+      release(&ptable.lock);
+      return 0;
+    }   
+  }
+  release(&ptable.lock);
+
+  // failure in case of process with pid was not found.
+  return -1;
 }
