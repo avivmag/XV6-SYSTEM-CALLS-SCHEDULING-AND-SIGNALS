@@ -60,7 +60,7 @@ Signaling a process is only possible if the receiving process has registered for
 
 1. open terminal and navigate to the program directory
 2. type `make qemu` and press enter, the operating system should now boot on.
-3. when shell is available, you can try the followings: sanity test with `sanity` command, signal test with `sigtest` command, change scheduler policy via `policy <policy_number>` command when policy number can be 1, 2 or 3 for the policies mentioned above respectively (for better view of the available user commands use `ls` command). 
+3. when shell is available, you can try the followings: sanity test with `sanity` command, signal test with `sigtest` command, change scheduler policy via `policy <policy_number>` command when policy number can be 1, 2 or 3 for the policies mentioned above respectively (for better view of the available user commands, use `ls` command). 
 4. enjoy :).
 
 ## Built With
